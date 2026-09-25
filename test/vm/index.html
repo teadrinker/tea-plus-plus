@@ -1,0 +1,1360 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Tea++ parser &amp; vm test</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --bg:      #14161a;
+        --fg:      #e6e6e6;
+        --dim:     #8b8f96;
+        --acc:     #7cc4ff;
+        --err:     #ff7676;
+        --line:    #232830;
+        --c-emit:  #9fdb9f;   /* soft green for emitted C source  */
+        --js-emit: #e8c98a;   /* soft amber for emitted JS source */
+        --tree:    #c3b1e8;   /* soft violet for the parse tree    */
+        --sh-emit: #8fd6d0;   /* soft teal for emitted GLSL / HLSL */
+    }
+    * { box-sizing: border-box; }
+    /* JetBrains Mono's ligatures break in editable text: typing after
+       ".." leaves " .". calt drives all of them, and no paint-path
+       workaround helped. Set on every element -- a `font:` shorthand
+       elsewhere resets the longhand.                                */
+    * {
+        font-variant-ligatures: none;
+        font-feature-settings: "calt" 0, "liga" 0, "clig" 0, "dlig" 0;
+    }
+    html, body {
+        margin: 0; padding: 0; height: 100%;
+        background: var(--bg); color: var(--fg);
+        font-family: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
+        font-size: 14px; line-height: 1.45;
+    }
+    body {
+        display: grid;
+        grid-template-rows: auto 1fr auto auto auto auto;
+        gap: 12px; padding: 16px;
+    }
+    h1 {
+        margin: 0; font-size: 13px; font-weight: 600;
+        color: var(--dim); letter-spacing: 0.06em; text-transform: uppercase;
+    }
+    .panes {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        /* the pixel row below can outgrow a short window; scroll rather than
+           squash the editor to nothing */
+        gap: 12px; min-height: 360px;
+        min-width: 0;  /* don't overflow the body grid cell */
+    }
+    .pane {
+        display: flex; flex-direction: column; min-height: 0;
+        /* min-width:0 or the <pre> panes' min-content width wins the fr
+           split and squeezes the narrow columns to nothing. */
+        min-width: 0;
+        border: 1px solid var(--line); border-radius: 6px;
+        background: #1a1d22;
+    }
+    .pane > .label {
+        padding: 8px 12px; border-bottom: 1px solid var(--line);
+        color: var(--dim); font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase;
+    }
+    /* source header: label on the left, example picker on the right */
+    .pane > .label.split {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 12px; padding: 5px 8px 5px 12px;
+    }
+    select {
+        background: #14161a; color: var(--fg);
+        border: 1px solid var(--line); border-radius: 4px;
+        font: inherit; font-size: 11px; padding: 3px 6px;
+        max-width: 62%;
+    }
+    select:focus { outline: 1px solid var(--acc); }
+    optgroup { color: var(--dim); font-style: normal; }
+    option { color: var(--fg); }
+    textarea {
+        flex: 1; resize: none; border: 0; outline: 0;
+        background: transparent; color: var(--fg);
+        font: inherit;
+        padding: 12px;
+        tab-size: 4;
+    }
+    #viz {
+        flex: 1; margin: 0; padding: 12px;
+        white-space: pre; overflow: auto;
+        font: inherit; color: var(--fg);
+    }
+    /* tabs */
+    .tab-bar {
+        display: flex; border-bottom: 1px solid var(--line);
+    }
+    .tab-btn {
+        padding: 7px 14px;
+        border: none; border-bottom: 2px solid transparent;
+        background: transparent; color: var(--dim);
+        font: inherit; font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; cursor: pointer;
+        margin-bottom: -1px;
+    }
+    .tab-btn:hover { color: var(--fg); }
+    .tab-btn.active {
+        color: var(--fg);
+        border-bottom-color: var(--acc);
+    }
+    .tab-panel { display: none; flex: 1; min-height: 0; }
+    .tab-panel.active { display: flex; }
+
+    #tree, #ccode, #jscode, #glslcode, #hlslcode {
+        flex: 1; margin: 0; padding: 12px;
+        white-space: pre; overflow: auto;
+        font: inherit; font-size: 12px;
+    }
+    #tree.ok   { color: var(--tree);    }
+    #ccode.ok  { color: var(--c-emit);  }
+    #jscode.ok { color: var(--js-emit); }
+    #glslcode.ok, #hlslcode.ok { color: var(--sh-emit); }
+    #tree.err,   #tree.idle   { color: var(--dim); }
+    #ccode.err,  #ccode.idle  { color: var(--dim); }
+    #jscode.err, #jscode.idle { color: var(--dim); }
+    #glslcode.err, #glslcode.idle, #hlslcode.err, #hlslcode.idle { color: var(--dim); }
+    /* the line a GLSL compile error names */
+    .errline { background: #4a1c1c; color: var(--err); }
+
+    /* -- wide layout: every pane side by side, tabs dissolve -- */
+    @media (min-width: 2400px) {
+        .panes { grid-template-columns: 1fr 0.6fr 0.8fr 0.85fr 0.85fr 0.85fr 0.85fr; }
+
+        /* Make the tabbed wrapper invisible to the grid so its
+           children (the three panels) become direct grid items.   */
+        .pane:last-child { display: contents; }
+
+        /* Hide the tab bar - navigation is no longer needed.       */
+        .tab-bar { display: none; }
+
+        /* All panels are always visible; style them like .pane.    */
+        .tab-panel, .tab-panel.active {
+            display: flex; flex-direction: column; min-height: 0;
+            min-width: 0;
+            border: 1px solid var(--line); border-radius: 6px;
+            background: #1a1d22;
+        }
+
+        /* Synthesise the label strip from data-label.              */
+        .tab-panel::before {
+            content: attr(data-label);
+            display: block;
+            padding: 8px 12px; border-bottom: 1px solid var(--line);
+            color: var(--dim); font-size: 11px; letter-spacing: 0.08em;
+            text-transform: uppercase;
+        }
+    }
+    #info {
+        border: 1px solid var(--line); border-radius: 6px;
+        background: #1a1d22; padding: 10px 12px;
+        white-space: pre-wrap; min-height: 2.5em;
+        font: inherit;
+    }
+    #info.ok  { color: var(--dim); }
+    #info.err { color: var(--err); border-color: #5a2a2a; background: #2a1717; }
+    .controls {
+        display: flex; gap: 16px; align-items: center; flex-wrap: wrap;
+        color: var(--dim); font-size: 12px;
+    }
+    .controls label { cursor: pointer; user-select: none; }
+    .controls input { vertical-align: middle; margin-right: 4px; }
+    .results {
+        display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;
+    }
+    @media (max-width: 900px) { .results { grid-template-columns: 1fr; } }
+    /* pixel mode: the interpreter's image, the GPU's, and their difference */
+    #pixels { display: none; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    #pixels.on { display: flex; }
+    #pixels figure { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+    #pixels figcaption { color: var(--dim); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    #pixels canvas {
+        width: 256px; height: 256px; image-rendering: pixelated;
+        border: 1px solid var(--line); border-radius: 4px; background: #000;
+    }
+    #pixelInfo { color: var(--dim); font-size: 12px; white-space: pre-wrap; max-width: 320px; }
+    #pixelInfo button {
+        background: #14161a; color: var(--fg); border: 1px solid var(--line);
+        border-radius: 4px; font: inherit; font-size: 12px; padding: 3px 10px; cursor: pointer;
+    }
+    #pixelInfo input[type=range] { width: 200px; vertical-align: middle; }
+    @media (max-width: 900px) { #pixels canvas { width: 160px; height: 160px; } }
+    .result {
+        border: 1px solid var(--line); border-radius: 6px;
+        background: #1a1d22; padding: 10px 12px;
+        white-space: pre-wrap; min-height: 2.5em; font: inherit;
+        min-width: 0; overflow-x: auto;
+    }
+    .result .tag {
+        color: var(--dim); font-size: 11px; letter-spacing: 0.08em;
+        text-transform: uppercase; margin-right: 8px;
+    }
+    .result.ok   { color: var(--acc); }
+    .result.err  { color: var(--err); border-color: #5a2a2a; background: #2a1717; }
+    .result.warn { color: #f0b74a; border-color: #5a4a1f; background: #2a2117; }
+    /* The js box disagreeing with the vm is the whole point of the page, so it
+       gets the loudest state -- and only that state is annotated in the text. */
+    .result.mismatch { color: var(--err); border-color: #7a2a2a; background: #3a1616; }
+    .result.idle { color: var(--dim); }
+</style>
+</head>
+<body>
+    <h1>Tea++ parser &amp; vm test</h1>
+
+    <div class="panes">
+        <div class="pane">
+            <div class="label split">
+                <span>source</span>
+                <select id="examples" title="load an example as a starting point">
+                    <option value="">&mdash; examples &mdash;</option>
+                </select>
+            </div>
+            <textarea id="src" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off"></textarea>
+        </div>
+        <div class="pane">
+            <div class="tab-bar">
+                <button class="tab-btn active" data-tab="tree">parser nodes</button>
+                <button class="tab-btn"        data-tab="viz">Line structure</button>
+                <button class="tab-btn"        data-tab="ccode">C source</button>
+                <button class="tab-btn"        data-tab="jscode">js source</button>
+                <button class="tab-btn"        data-tab="glslcode">glsl source</button>
+                <button class="tab-btn"        data-tab="hlslcode">hlsl source</button>
+            </div>
+            <div class="tab-panel active" id="panel-tree" data-label="parser nodes &mdash; ast_tree()">
+                <pre id="tree" class="idle">&mdash;</pre>
+            </div>
+            <div class="tab-panel" id="panel-viz" data-label="Line structure &mdash; parser_debugrows()">
+                <pre id="viz"></pre>
+            </div>
+            <div class="tab-panel" id="panel-ccode" data-label="C source &mdash; emit_c()">
+                <pre id="ccode" class="idle">&mdash;</pre>
+            </div>
+            <div class="tab-panel" id="panel-jscode" data-label="js source &mdash; emit_js()">
+                <pre id="jscode" class="idle">&mdash;</pre>
+            </div>
+            <div class="tab-panel" id="panel-glslcode" data-label="glsl source &mdash; emit_glsl()">
+                <pre id="glslcode" class="idle">&mdash;</pre>
+            </div>
+            <div class="tab-panel" id="panel-hlslcode" data-label="hlsl source &mdash; emit_hlsl() (D3D11, shown only)">
+                <pre id="hlslcode" class="idle">&mdash;</pre>
+            </div>
+        </div>
+    </div>
+
+    <div class="controls">
+        <label><input type="checkbox" id="runVm" checked> run vm</label>
+        <label title="eval the emitted module and call __script__() on every source change"><input type="checkbox" id="runJs" checked> run js</label>
+        <label title="compile the emitted GLSL on WebGL2 and compare with the vm, both at f32 (the shader profile)"><input type="checkbox" id="runGl" checked> run webgl</label>
+    </div>
+    <div class="results">
+        <div id="vm" class="result idle"><span class="tag">vm</span>&mdash;</div>
+        <div id="js" class="result idle"><span class="tag">js</span>&mdash;</div>
+        <div id="gl" class="result idle"><span class="tag">webgl</span>&mdash;</div>
+    </div>
+    <div id="pixels">
+        <figure><canvas id="pxVm" width="128" height="128"></canvas><figcaption>vm (f32)</figcaption></figure>
+        <figure><canvas id="pxGl" width="128" height="128"></canvas><figcaption>webgl</figcaption></figure>
+        <figure><canvas id="pxDiff" width="128" height="128"></canvas><figcaption>|difference| &times; 16</figcaption></figure>
+        <div id="pixelInfo">
+            <div><button id="pxPlay">pause</button> <label>iTime <input type="range" id="pxTime" min="0" max="20" step="0.01" value="0"></label> <span id="pxTimeVal">0.00</span></div>
+            <div id="pxStats">&mdash;</div>
+            <div>The webgl canvas animates; the vm and the difference follow when paused or when iTime is dragged. Mouse over webgl sets iMouse.</div>
+        </div>
+    </div>
+    <div id="info" class="ok">loading wasm&hellip;</div>
+
+<script>
+// ---------------------------------------------------------------------------
+// Example programs, lifted from the backend's own differential corpus
+// (tests/test_emit_script_diff.c). Each is a shape that used to fail QUIETLY
+// on one target or the other, so they double as a smoke test that the vm, C
+// and JS columns still agree.
+//
+// Written in the DSL's indent form throughout -- braces parse too, but the
+// indent and one-line (`then` / `do`) blocks are what the language reads like.
+//
+// `#disable auto_const` keeps a top-level `x = 0` a variable: without it the
+// value folds into every use and the emitted code is just the answer.
+const EXAMPLES = [
+  ["basics", [
+    ["block forms",
+        "// Block forms: Braces vs one-liner vs indented\n\n" +
+        "i = 0\n" +
+        "while(i < 10) { i++; }\n" +
+        "while i < 20 do i++\n" +
+        "while i < 30\n" +
+        "    i++\n" +
+        "i\n"],
+    ["factorial (recursion)",
+        "fact = (n : i32) =>\n" +
+        "    if n < 2\n" +
+        "        return 1\n" +
+        "    return n * fact(n - 1)\n" +
+        "\nfact(7)\n"],
+    ["fibonacci",
+        "fib = (n : i32) =>\n" +
+        "    if n < 2\n" +
+        "        return n\n" +
+        "    return fib(n - 1) + fib(n - 2)\n" +
+        "\nfib(20)\n"],
+    ["template specialisation",
+        "// One source function, two compiled instances: i32 and f64.\n\n" +
+        "sq = (x) => x * x\n" +
+        "\nsq(3) + sq(10.0)\n"],
+    ["loops: break / continue",
+        "// `then` opens a block that the end of the line closes, so a body\n" +
+        "// this short needs neither braces nor its own indented line.\n\n" +
+        "s = 0\n" +
+        "for i in 0..10\n" +
+        "    if i % 2 == 0 then continue\n" +
+        "    if i == 9 then break\n" +
+        "    s = s + i\n" +
+        "\ns\n"],
+    ["range for",
+        "// 0..10 stops before 10; 0..=10 would include it.\n\n" +
+        "s = 0\n" +
+        "for i in 0..10\n" +
+        "    s = s + i * i\n" +
+        "\ns\n"],
+  ]],
+  ["truthiness", [
+    ["zero is false (but not in Lua)",
+        "// C, the interpreter and JS all say 0 is falsy; Lua does not, so\n" +
+        "// every condition is emitted with an explicit != 0.\n\n" +
+        "#disable auto_const\n" +
+        "x = 0\n" +
+        "if x then return 7\n" +
+        "\n9\n"],
+    ["&& yields 1, not an operand",
+        "#disable auto_const\n" +
+        "a = 1\n" +
+        "b = 2\n" +
+        "\na && b\n"],
+    ["short circuit guards a div by zero",
+        "#disable auto_const\n" +
+        "d = 0\n" +
+        "\n(d != 0) && (10 / d > 0)\n"],
+    ["comparison in value position",
+        "#disable auto_const\n" +
+        "a = 3\n" +
+        "b = 5\n" +
+        "\n(a < b) + (a > b) * 10\n"],
+    ["ternary must not evaluate both arms",
+        "#disable auto_const\n" +
+        "c = 0\n" +
+        "d = 0\n" +
+        "x = c > 0 ? 100 / d : 42\n" +
+        "\nx\n"],
+  ]],
+  ["integer semantics", [
+    ["truncating division (C, not JS)",
+        "// -7/2 is -3 in C and in the VM; plain JS would say -3.5. Every\n" +
+        "// operand here is constant, so folding would answer the whole line\n" +
+        "// at compile time and emit the number -- and the op the backends\n" +
+        "// reach for, VM.tdiv, is exactly what this is about.\n\n" +
+        "#disable const_folding\n" +
+        "\n-7 / 2 * 1000 + (-7 % 2) * 100 + 7 % -2\n"],
+    ["division by zero is guarded",
+        "// #disable safe_div_by_zero\n" +
+        "#disable auto_const\n" +
+        "d = 0\n" +
+        "\n10 / d\n"],
+    ["32-bit wraparound",
+        "#disable auto_const\n" +
+        "a = 2000000000\n" +
+        "b = 100000\n" +
+        "\n(a + a) + (b * b)\n"],
+    ["shifts and sign extension",
+        "// 1 << 31 wraps to INT_MIN and -1 >> 3 stays -1: the shift is\n" +
+        "// arithmetic, not logical. Both are constant, so they only survive\n" +
+        "// as far as the emitted code with folding off.\n\n" +
+        "#disable const_folding\n" +
+        "#disable auto_const\n" +
+        "a = -8\n" +
+        "\n(1 << 31) + (a >> 1) + (-1 >> 3)\n"],
+    ["i64 -- refused by the JS backend",
+        "// No 64-bit integer in JS without BigInt, so emit_js() refuses and\n" +
+        "// names the #rewire that fixes it. The C column still works.\n\n" +
+        "a : i64 = 1\n" +
+        "a = a << 33\n" +
+        "\ni32(a >> 30)\n"],
+    ["fixed point (i64 rewired away)",
+        "#rewire f64 -> fx16\n" +
+        "#rewire i64 -> i32\n" +
+        "#disable auto_const\n\n" +
+        "a = 1.5\n" +
+        "b = 2.25\n" +
+        "\ni32(a * b * 100.0)\n"],
+    ["fixed point result",
+        "// The fx shift rides in the type, not the value, so every box reports\n" +
+        "// the number 3.375. The emitted targets return the 221184 it is stored\n" +
+        "// as, which is why they show the raw alongside.\n\n" +
+        "#rewire f64 -> fx16\n" +
+        "#rewire i64 -> i32\n" +
+        "#disable auto_const\n" +
+        "a = 1.5\n" +
+        "b = 2.25\n" +
+        "\na * b\n"],
+    ["fixed point array result",
+        "// An fx array's shift lives in its element type; decoded the same way.\n\n" +
+        "#rewire f64 -> fx16\n" +
+        "\n[10, 20] as fx16\n"],
+    ["#disable safe_div_by_zero",
+        "// The guard is a real branch: with it, 10 / 0 is 0 and the js pane\n" +
+        "// calls VM.tdiv. Without it both targets divide straight, and the\n" +
+        "// interpreter -- wasm here -- traps rather than returning. Set d to 0\n" +
+        "// and watch the vm box.\n\n" +
+        "#disable safe_div_by_zero\n" +
+        "#disable auto_const\n" +
+        "d = 4\n" +
+        "\n10 / d\n"],
+  ]],
+  ["floats", [
+    ["f32 rounds at every node",
+        "// Math.fround() on every f32 node -- that is what makes single\n" +
+        "// precision real in JS. Lua has no f32 at all and refuses.\n\n" +
+        "f = (x : f32) => x * x\n" +
+        "\nf(0.1) * 1000.0\n"],
+    ["f64 accumulation",
+        "x = 0.1\n" +
+        "s = 0.0\n" +
+        "for i in 0..10 do s = s + x\n" +
+        "\ns\n"],
+    ["math builtins",
+        "// Constant arguments, so with folding on none of the three builtins\n" +
+        "// would reach a backend at all -- the whole line emits as one number.\n\n" +
+        "#disable const_folding\n" +
+        "\nfloor(-2.75) * 100.0 + frac(-2.75) + smoothstep(0.0, 1.0, 0.25)\n"],
+    ["bitcast f32 <-> i32",
+        "#disable auto_const\n" +
+        "a = 1.0f\n" +
+        "\nbitcast(i32, a)\n"],
+  ]],
+  ["aggregates", [
+    ["arrays are values, not references",
+        "// w = v COPIES. Getting this wrong returns a plausible wrong number\n" +
+        "// rather than an error, which is why it is tested first.\n\n" +
+        "v = [1.0, 2.0, 3.0]\n" +
+        "w = v\n" +
+        "v[0] = 9.0\n" +
+        "\nw[0]\n"],
+    ["array parameters copy too",
+        "g = (a : [3]f64) =>\n" +
+        "    a[0] = 99.0\n" +
+        "    return a[0]\n" +
+        "v = [1.0, 2.0, 3.0]\n" +
+        "q = g(v)\n" +
+        "\nv[0] * 100.0 + q\n"],
+    ["sum: for x in a",
+        "\n" +
+        "a = [10, 20, 30, 40]\n" +
+        "s = 0\n" +
+        "for x in a do s = s + x\n" +
+        "\ns\n"],
+    ["sum: for i, x in a",
+        "// A second name in front gives the index alongside the element,\n" +
+        "// Python's enumerate without the ceremony.\n" +
+        "a = [10, 20, 30, 40]\n" +
+        "s = 0\n" +
+        "for i, x in a\n" +
+        "    s = s + i * x\n" +
+        "\ns\n"],
+    ["nested arrays",
+        "// a[i] is a ROW, so .len counts rows and `for row in a` walks them.\n" +
+        "a = [[1, 2], [3, 4]]\n" +
+        "s = 0\n" +
+        "for row in a do s = s + row[1]\n" +
+        "\ns * 10 + a.len\n"],
+    ["slices write through",
+        "a : [4]i32 = [0, 0, 0, 0]\n" +
+        "s = slice(a, 1, 2)\n" +
+        "s[0] = 7\n" +
+        "\na[1] * 100 + s.len\n"],
+    ["slice of a slice",
+        "a = [1, 2, 3, 4, 5]\n" +
+        "s = slice(a, 1, 4)\n" +
+        "t = slice(s, 1, 2)\n" +
+        "\nt.len * 100 + t[0]\n"],
+  ]],
+  ["strings & identifiers", [
+    ["str() and concat",
+        "t = str(42) ~ \"ab\"\n" +
+        "\nt.len * 1000 + t[0] + t[3]\n"],
+    ["float formatting",
+        "t = str(3.25, 2)\n" +
+        "\nt.len * 1000 + t[0] + t[1]\n"],
+    ["target keywords as identifiers",
+        "// `end` and `function` are Lua/JS keywords and legal DSL names; the\n" +
+        "// escape must not collide with a name already spelled end_.\n" +
+        "#disable auto_const\n" +
+        "end = 5\n" +
+        "end_ = 7\n" +
+        "function = 3\n" +
+        "\nend * 100 + end_ * 10 + function\n"],
+  ]],
+  ["shaders (webgl)", [
+    ["vec3, swizzles, geometry",
+        "// vec3(...) is [3]f32, and .xyzw / .rgba work on any array. The webgl\n" +
+        "// box runs the glsl pane and compares with the vm, both at f32.\n\n" +
+        "v = vec3(1, 2, 3)\n" +
+        "w = v.zyx * 2.0\n" +
+        "w.xy = w.yx\n" +
+        "n = normalize(w)\n" +
+        "\nreflect(v, n)\n"],
+    ["refract and the zero vector",
+        "// normalize(0) is the zero vector in the vm (a guarded divide), so the\n" +
+        "// shaders call a helper rather than GLSL's normalize, which gives NaN.\n\n" +
+        "r = refract(vec2(0.6, -0.8), vec2(0, 1), 0.5)\n" +
+        "z = normalize(vec2(0, 0))\n" +
+        "\nvec3(r.x, r.y, z.x + z.y)\n"],
+    ["integer % and / with negatives",
+        "// C truncates; GLSL leaves % of a negative undefined, so it becomes a\n" +
+        "// helper there. HLSL's % already matches C.\n\n" +
+        "#disable auto_const\n" +
+        "a = -7\n" +
+        "b = 3\n" +
+        "\n(a % b) * 100 + a / b\n"],
+    ["fmod floors (as GLSL mod does)",
+        "#disable auto_const\n" +
+        "x = -7.5\n" +
+        "\nfmod(x, 2.0)\n"],
+    ["&& with a side effect (hlsl refuses)",
+        "// fxc (D3D11) evaluates BOTH sides of &&, so a call that writes its\n" +
+        "// argument is refused in the hlsl pane. GLSL short-circuits and runs it.\n\n" +
+        "#disable auto_const\n" +
+        "bump = (a: []) =>\n" +
+        "    a[0] = 5\n" +
+        "    return 1\n" +
+        "d = 0\n" +
+        "v = [0, 0]\n" +
+        "r = (d != 0) && (bump(v) > 0)\n" +
+        "\nr * 10 + v[0]\n"],
+    ["image: Shadertoy's default",
+        "// A unit that defines mainImage is an image: drawn by webgl, by the vm,\n" +
+        "// and compared pixel by pixel. Parameters are bound by name.\n\n" +
+        "mainImage = (fragCoord: vec2, iResolution: vec3, iTime: f32) =>\n" +
+        "    uv = fragCoord / iResolution.xy\n" +
+        "    col = 0.5 + 0.5 * cos(iTime + uv.xyx + [0.0, 2.0, 4.0])\n" +
+        "    vec4(col, 1.0)\n"],
+    ["image: plasma",
+        "mainImage = (fragCoord: vec2, iResolution: vec3, iTime: f32) =>\n" +
+        "    uv = fragCoord / iResolution.xy\n" +
+        "    v = sin(uv.x * 10.0 + iTime) + sin(uv.y * 10.0 + iTime * 1.3)\n" +
+        "    v = v + sin((uv.x + uv.y) * 10.0 + iTime * 0.7)\n" +
+        "    vec3(0.5 + 0.5 * sin(v * 3.14), 0.5 + 0.5 * cos(v * 3.14), 0.5 + 0.5 * sin(v))\n"],
+    ["image: SDF circle",
+        "mainImage = (fragCoord: vec2, iResolution: vec3, iTime: f32) =>\n" +
+        "    p = (fragCoord - iResolution.xy * 0.5) / iResolution.y\n" +
+        "    d = length(p) - 0.3 - 0.05 * sin(iTime * 2.0)\n" +
+        "    c = 1.0 - smoothstep(0.0, 0.02, d)\n" +
+        "    vec3(c, c * 0.5, 1.0 - c)\n"],
+    ["image: mandelbrot",
+        "mainImage = (fragCoord: vec2, iResolution: vec3) =>\n" +
+        "    c = (fragCoord / iResolution.xy - 0.5) * 3.0 - vec2(0.5, 0.0)\n" +
+        "    z = vec2(0.0, 0.0)\n" +
+        "    n = 0\n" +
+        "    while n < 48 && dot(z, z) < 4.0\n" +
+        "        z = vec2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y)\n" +
+        "        n = n + 1\n" +
+        "    f32(n) / 48.0\n"],
+    ["image: mandelbrot - fixed point",
+        "#push rewire double -> float\n" +
+        "mainImage = (fragCoord: vec2, iResolution: vec3) =>\n" +
+        "    frag = (fragCoord / iResolution.xy) as fx16\n" +
+        "    #push rewire float -> fx16\n" +
+        "\n" +
+        "    c = (frag - 0.5) * 3.0 - vec2(0.5, 0.0)\n" +
+        "    z = vec2(0.0, 0.0)\n" +
+        "    n = 0\n" +
+        "    while n < 48 && dot(z, z) < 4.0\n" +
+        "        z = vec2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y)\n" +
+        "        n = n + 1\n" +
+        "\n" +
+        "    #pop\n" +
+        "    n / 48.0\n"],
+    ["image: follow the mouse",
+        "mainImage = (fragCoord: vec2, iResolution: vec3, iMouse: vec4) =>\n" +
+        "    d = length(fragCoord - iMouse.xy) / iResolution.y\n" +
+        "    c = 1.0 - smoothstep(0.05, 0.06, d)\n" +
+        "    vec3(c, 0.2, 0.3)\n"],
+    ["image: 0xRRGGBB (apps/pixelshader)",
+        "// An i32 result is read as 0xRRGGBB, so pixelshader's perpixel ports.\n\n" +
+        "mainImage = (fragCoord: vec2, iTime: f32) =>\n" +
+        "    x = i32(fragCoord.x)\n" +
+        "    y = i32(fragCoord.y)\n" +
+        "    r = x * 2\n" +
+        "    g = i32(f32(x - y) + iTime * 130.0) % 128\n" +
+        "    b = y * 2\n" +
+        "    ((r & 255) << 16) | ((g & 255) << 8) | (b & 255)\n"],
+  ]],
+];
+
+const DEFAULT_SRC = EXAMPLES[0][1][0][1];
+
+(async () => {
+    const infoEl   = document.getElementById("info");
+    const srcEl    = document.getElementById("src");
+    const vizEl    = document.getElementById("viz");
+    const vmEl     = document.getElementById("vm");
+    const jsEl     = document.getElementById("js");
+    const vmChk    = document.getElementById("runVm");
+    const jsChk    = document.getElementById("runJs");
+    const treeEl   = document.getElementById("tree");
+    const ccodeEl  = document.getElementById("ccode");
+    const jscodeEl = document.getElementById("jscode");
+    const glslEl   = document.getElementById("glslcode");
+    const hlslEl   = document.getElementById("hlslcode");
+    const glEl     = document.getElementById("gl");
+    const glChk    = document.getElementById("runGl");
+    const pixelsEl = document.getElementById("pixels");
+    const exSel    = document.getElementById("examples");
+
+    const setInfo = (msg, isErr) => {
+        infoEl.textContent = msg;
+        infoEl.className = isErr ? "err" : "ok";
+    };
+
+    // A result box is a tag plus a body; only the body changes.
+    const setResult = (el, tag, text, cls) => {
+        el.textContent = "";
+        const t = document.createElement("span");
+        t.className = "tag";
+        t.textContent = tag;
+        el.appendChild(t);
+        el.appendChild(document.createTextNode(text));
+        el.className = "result " + cls;
+    };
+
+    // ---- populate the example picker ------------------------------------
+    // Options carry a flat index, not a "group name" key: several group and
+    // example names contain spaces, so any string key would need escaping.
+    const FLAT = [];
+    for (const [group, items] of EXAMPLES) {
+        const og = document.createElement("optgroup");
+        og.label = group;
+        for (const [name, src] of items) {
+            const opt = document.createElement("option");
+            opt.value = String(FLAT.length);
+            opt.textContent = name;
+            FLAT.push(src);
+            og.appendChild(opt);
+        }
+        exSel.appendChild(og);
+    }
+
+    // The Module is kept, not just the first Instance: a trap has to be
+    // recoverable (see wcall below), and `new WebAssembly.Instance` is the
+    // synchronous way to get a fresh one from inside update().
+    let wasm, wasmModule, inputPtr, inputCap;
+    const instantiate = () => {
+        wasm     = new WebAssembly.Instance(wasmModule, { env: {} }).exports;
+        inputPtr = wasm.get_input_buffer();
+        inputCap = wasm.input_buffer_capacity();
+    };
+    try {
+        // no-store: a script-initiated fetch is not reliably cache-bypassed by
+        // a browser hard-reload, so the page would keep an old wasm.
+        const resp = await fetch("main.wasm", { cache: "no-store" });
+        if (!resp.ok) throw new Error("fetch main.wasm: " + resp.status);
+        wasmModule = await WebAssembly.compile(await resp.arrayBuffer());
+        instantiate();
+    } catch (e) {
+        setInfo("failed to load wasm: " + e.message, true);
+        return;
+    }
+
+    // Every export goes through here. The interpreter executes an unguarded
+    // native divide under `#disable safe_div_by_zero`, and on a zero divisor
+    // that is a wasm trap -- which unwinds straight out of the export, past
+    // every free() the aborted call owed.
+    //
+    // What that leaves behind is a leak, not damage: linear memory is exactly
+    // where it was and the instance stays usable, but the arena is holding a
+    // ParseResult and a VM nobody will ever release. So keep the instance and
+    // start over only once the leak has actually eaten the arena -- a source
+    // that traps traps again on the NEXT keystroke too, and rebuilding here
+    // would mean a fresh 4 MB memory for every character typed while editing
+    // one.
+    const TRAPS_PER_RESET = 64;
+    let trap = null, trapsSinceReset = 0;
+    const wcall = (name, ...args) => {
+        trap = null;
+        try {
+            return wasm[name](...args);
+        } catch (e) {
+            trap = (e && e.message) ? e.message : String(e);
+            let oom = 1;
+            try { oom = wasm.alloc_oom(); } catch (_) { /* keep 1: start over */ }
+            if (oom || ++trapsSinceReset >= TRAPS_PER_RESET) {
+                instantiate();
+                trapsSinceReset = 0;
+            }
+            return null;
+        }
+    };
+
+    // A trap is a fact about the op the vm just executed, so say which op and
+    // what turns the guard back on.
+    const trapText = (t) =>
+        "trap: " + t + (/zero/i.test(t)
+            ? "   (unguarded native op -- `#enable safe_div_by_zero` puts the check back)"
+            : "");
+
+    const mem = () => new Uint8Array(wasm.memory.buffer);
+
+    const decoder = new TextDecoder();
+    const encoder = new TextEncoder();
+
+    const readCStr = (ptr) => {
+        if (!ptr) return "";
+        const m = mem();
+        let end = ptr;
+        while (m[end] !== 0) end++;
+        return decoder.decode(m.subarray(ptr, end));
+    };
+
+
+    // Evaluate an emitted module and call its entry point. The module ends in
+    // `module.exports = EXPORTS` behind a typeof guard, so in the browser that
+    // line is inert -- we pull EXPORTS out of the function body instead.
+    const evalEmittedJs = (text) => {
+        let mod;
+        try {
+            const factory = new Function(
+                text + "\n;return typeof EXPORTS !== \"undefined\" ? EXPORTS : null;");
+            mod = factory();
+        } catch (e) {
+            return { err: "eval: " + (e && e.message ? e.message : String(e)) };
+        }
+        if (!mod || typeof mod.__script__ !== "function")
+            return { err: "emitted module has no __script__ entry point" };
+        try {
+            const t0 = performance.now();
+            const v = mod.__script__();
+            return { val: v, ms: performance.now() - t0 };
+        } catch (e) {
+            return { err: "run: " + (e && e.message ? e.message : String(e)) };
+        }
+    };
+
+    // A run's result as the vm decoded it: `which` 0 is run_vm, 1 run_vm_shader.
+    // The numbers it stands for -- an fx value already divided by its shift --
+    // or null when the result is not numbers (void, i64, a string, a struct).
+    const readRes = (which) => {
+        const n = wasm.res_n(which);
+        if (n < 0) return null;
+        const vals = [];
+        for (let k = 0; k < n; k++) vals.push(wasm.res_val(which, k));
+        return { vals: vals, total: wasm.res_total(which), shift: wasm.res_shift(which),
+                 isInt: wasm.res_is_int(which) !== 0, agg: wasm.res_is_agg(which) !== 0,
+                 type: readCStr(wasm.res_type(which)) };
+    };
+
+    // The fx shift is compile-time only, so every emitted target returns the RAW
+    // storage -- 221184 for 3.375 in fx16. This is the one place it is decoded.
+    const fromRaw = (res, xs) => Array.from(xs, (x) => res.shift > 0 ? Number(x) / 2 ** res.shift : Number(x));
+    const toRaw   = (res) => res.vals.map((v) => res.shift > 0 ? v * 2 ** res.shift : v);
+
+    // Every box prints through here, from its raw values and the vm's type, so the
+    // same answer always reads the same: `0.25 : fx16  (raw 16384)`. An fx value
+    // keeps its point; an f32 shows the 7 digits it has, whoever computed it.
+    const fmtNum = (res, x) => res.shift > 0 && Number.isInteger(x) ? x.toFixed(1)
+                             : /f32$/.test(res.type) ? String(Number(x.toPrecision(7))) : String(x);
+    // At most RES_MAX elements, the most the vm reports.
+    const RES_MAX = 16;
+    const fmtRes = (res, raw) => {
+        if (res.type === "void") return "(void)";
+        const all = Array.from(raw, Number), shown = all.slice(0, RES_MAX);
+        const cut = shown.length < Math.max(all.length, res.total) ? ", ..." : "";
+        let s = fromRaw(res, shown).map((x) => fmtNum(res, x)).join(", ");
+        if (res.agg) s = "[" + s + cut + "]";
+        return s + " : " + res.type + (res.shift > 0 ? "  (raw " + shown.join(", ") + cut + ")" : "");
+    };
+
+    // Integers -- fx included -- must agree exactly. Floats are held to 6
+    // significant digits: the JS backend need not round through f32 at every
+    // step the way the interpreter does.
+    const agrees = (res, want, v) => {
+        if (Object.is(want, v)) return true;
+        if (res.isInt) return false;
+        if (Number.isNaN(v)) return Number.isNaN(want);
+        if (!Number.isFinite(v)) return v === want;
+        return Number(v.toPrecision(6)) === Number(want.toPrecision(6));
+    };
+
+    // ---- WebGL ----------------------------------------------------------
+    // One WebGL2 context, on the pixel-mode canvas: an image draws into its
+    // default framebuffer, and every comparison reads back from a float (or
+    // int) target, so the values are the shader's own, not 8-bit colour.
+    const PX = 128;
+    const pxGlEl = document.getElementById("pxGl");
+    const gl = pxGlEl.getContext("webgl2", { preserveDrawingBuffer: true, antialias: false });
+    const glFloatTargets = !!(gl && gl.getExtension("EXT_color_buffer_float"));
+    let glQuad = null;
+    if (gl) {
+        glQuad = gl.createBuffer();
+        gl.bindBuffer(gl.ARRAY_BUFFER, glQuad);
+        gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+    }
+    const GL_VS = "#version 300 es\nin vec2 p;\nvoid main() { gl_Position = vec4(p, 0.0, 1.0); }\n";
+
+    // A linked program, or { err, line } -- `line` the 1-based source line the
+    // first error names, for the glsl pane.
+    const glProgram = (fsrc) => {
+        const sh = (type, src) => {
+            const s = gl.createShader(type);
+            gl.shaderSource(s, src);
+            gl.compileShader(s);
+            if (gl.getShaderParameter(s, gl.COMPILE_STATUS)) return { s };
+            const log = gl.getShaderInfoLog(s) || "compile failed";
+            gl.deleteShader(s);
+            const m = /ERROR:\s*\d+:(\d+):/.exec(log);
+            return { err: log.trim(), line: m ? Number(m[1]) : 0 };
+        };
+        const v = sh(gl.VERTEX_SHADER, GL_VS);
+        if (v.err) return v;
+        const f = sh(gl.FRAGMENT_SHADER, fsrc);
+        if (f.err) { gl.deleteShader(v.s); return f; }
+        const prog = gl.createProgram();
+        gl.attachShader(prog, v.s);
+        gl.attachShader(prog, f.s);
+        gl.bindAttribLocation(prog, 0, "p");
+        gl.linkProgram(prog);
+        gl.deleteShader(v.s);
+        gl.deleteShader(f.s);
+        if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) {
+            const log = gl.getProgramInfoLog(prog) || "link failed";
+            gl.deleteProgram(prog);
+            return { err: log.trim(), line: 0 };
+        }
+        return { prog };
+    };
+
+    // Draw `prog` over w x h with the Shadertoy inputs. With `readInt` /
+    // `readFloat` it draws into a matching target and returns the pixels,
+    // bottom row first; otherwise into the canvas.
+    const glDraw = (prog, w, h, inp, read) => {
+        let fbo = null, tex = null;
+        if (read) {
+            tex = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.texStorage2D(gl.TEXTURE_2D, 1, read === "int" ? gl.RGBA32I : gl.RGBA32F, w, h);
+            fbo = gl.createFramebuffer();
+            gl.bindFramebuffer(gl.FRAMEBUFFER, fbo);
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+        } else {
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        }
+        gl.viewport(0, 0, w, h);
+        gl.useProgram(prog);
+        const u = (n) => gl.getUniformLocation(prog, n);
+        if (u("iResolution")) gl.uniform3f(u("iResolution"), w, h, 1);
+        if (u("iTime"))       gl.uniform1f(u("iTime"), inp.t);
+        if (u("iTimeDelta"))  gl.uniform1f(u("iTimeDelta"), 1 / 60);
+        if (u("iFrame"))      gl.uniform1i(u("iFrame"), inp.frame);
+        if (u("iMouse"))      gl.uniform4f(u("iMouse"), inp.mouse[0], inp.mouse[1], inp.mouse[2], inp.mouse[3]);
+        gl.bindBuffer(gl.ARRAY_BUFFER, glQuad);
+        gl.enableVertexAttribArray(0);
+        gl.vertexAttribPointer(0, 2, gl.FLOAT, false, 0, 0);
+        gl.drawArrays(gl.TRIANGLES, 0, 6);
+        let px = null;
+        if (read) {
+            px = read === "int" ? new Int32Array(w * h * 4) : new Float32Array(w * h * 4);
+            gl.readPixels(0, 0, w, h, read === "int" ? gl.RGBA_INTEGER : gl.RGBA, read === "int" ? gl.INT : gl.FLOAT, px);
+            gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+            gl.deleteFramebuffer(fbo);
+            gl.deleteTexture(tex);
+        }
+        return px;
+    };
+
+    // The glsl pane, with the line a compile error names marked.
+    const showGlsl = (text, cls, errLine) => {
+        glslEl.className = cls;
+        glslEl.textContent = "";
+        if (!errLine) { glslEl.textContent = text; return; }
+        const lines = text.split("\n");
+        for (let i = 0; i < lines.length; i++) {
+            const t = lines[i] + (i + 1 < lines.length ? "\n" : "");
+            if (i + 1 === errLine) {
+                const s = document.createElement("span");
+                s.className = "errline";
+                s.textContent = t;
+                glslEl.appendChild(s);
+            } else {
+                glslEl.appendChild(document.createTextNode(t));
+            }
+        }
+    };
+
+    // GPU and interpreter agree when ints are equal and floats are within 1e-4
+    // relative: both run f32, but GPU transcendentals are not math_pure's.
+    const glAgrees = (got, want, isInt, tol) => {
+        if (isInt) return got === want;
+        if (Number.isNaN(want)) return Number.isNaN(got);
+        return Math.abs(got - want) / Math.max(1, Math.abs(want)) <= tol;
+    };
+
+    // ---- pixel mode ----
+    const px = {
+        on: false, prog: null, playing: true, t: 0, frame: 0, mouse: [0, 0, 0, 0],
+        last: 0, raf: 0, vmOk: false,
+    };
+    const pxVmCtx   = document.getElementById("pxVm").getContext("2d");
+    const pxDiffCtx = document.getElementById("pxDiff").getContext("2d");
+    const pxTimeEl  = document.getElementById("pxTime");
+    const pxTimeVal = document.getElementById("pxTimeVal");
+    const pxPlayEl  = document.getElementById("pxPlay");
+    const pxStatsEl = document.getElementById("pxStats");
+
+    // Floats, bottom row first, into a 2D canvas (whose row 0 is the top).
+    const putRgba = (ctx, f, scale, abs) => {
+        const img = ctx.createImageData(PX, PX);
+        for (let y = 0; y < PX; y++)
+            for (let x = 0; x < PX; x++) {
+                const s = ((PX - 1 - y) * PX + x) * 4, d = (y * PX + x) * 4;
+                for (let k = 0; k < 3; k++) {
+                    let v = f[s + k] * scale;
+                    if (abs) v = Math.abs(v);
+                    img.data[d + k] = Math.max(0, Math.min(255, Math.round(v * 255)));
+                }
+                img.data[d + 3] = 255;
+            }
+        ctx.putImageData(img, 0, 0);
+    };
+
+    const pxInputs = () => ({ t: px.t, frame: px.frame, mouse: px.mouse });
+
+    // The interpreter's image and the GPU's, compared. Slow-ish (the vm draws
+    // PX*PX pixels), so run when the picture holds still.
+    const pxCompare = () => {
+        if (!px.on || !px.prog) return;
+        const t0 = performance.now();
+        const m = px.mouse;
+        const ptr = wcall("image_render", PX, PX, px.t, px.frame, m[0], m[1], m[2], m[3]);
+        const vmMs = performance.now() - t0;
+        if (trap || !ptr) {
+            const e = trap ? trapText(trap) : readCStr(wasm.shader_ref_text());
+            setResult(glEl, "webgl", "vm image: " + (e || "failed"), "err");
+            pxStatsEl.textContent = "vm image failed: " + (e || "?");
+            // Else they keep the last image that did draw, and read as this one's.
+            pxVmCtx.clearRect(0, 0, PX, PX);
+            pxDiffCtx.clearRect(0, 0, PX, PX);
+            return;
+        }
+        const want = new Float32Array(wasm.memory.buffer, ptr, PX * PX * 4).slice();
+        putRgba(pxVmCtx, want, 1, false);
+        const got = glDraw(px.prog, PX, PX, pxInputs(), "float");
+        glDraw(px.prog, PX, PX, pxInputs(), null);
+        const diff = new Float32Array(PX * PX * 4);
+        let worst = 0, where = "";
+        for (let i = 0; i < PX * PX; i++)
+            for (let k = 0; k < 4; k++) {
+                const d = got[i * 4 + k] - want[i * 4 + k];
+                diff[i * 4 + k] = d;
+                if (Math.abs(d) > worst || Number.isNaN(d)) {
+                    worst = Number.isNaN(d) ? Infinity : Math.abs(d);
+                    where = "(" + (i % PX) + ", " + Math.floor(i / PX) + ")";
+                }
+            }
+        putRgba(pxDiffCtx, diff, 16, true);
+        const ok = worst <= 2e-3;
+        pxStatsEl.textContent = "max |diff| " + worst.toPrecision(3) + (ok ? "" : " at " + where) +
+                                "\nvm image " + vmMs.toFixed(0) + " ms (" + PX + "×" + PX + ")";
+        setResult(glEl, "webgl",
+                  "→ image " + PX + "×" + PX + ", max |diff| " + worst.toPrecision(3) +
+                  (ok ? "   ✓ vm@f32" : "   ✗ differs from the vm at " + where), ok ? "ok" : "mismatch");
+    };
+
+    const pxTick = (now) => {
+        px.raf = 0;
+        if (!px.on || !px.prog) return;
+        if (px.playing) {
+            const dt = px.last ? Math.min(0.1, (now - px.last) / 1000) : 0;
+            px.t = (px.t + dt) % 20;
+            px.frame++;
+            pxTimeEl.value = String(px.t);
+            pxTimeVal.textContent = px.t.toFixed(2);
+            glDraw(px.prog, PX, PX, pxInputs(), null);
+        }
+        px.last = now;
+        px.raf = requestAnimationFrame(pxTick);
+    };
+
+    const pxStop = () => {
+        if (px.raf) cancelAnimationFrame(px.raf);
+        px.raf = 0;
+        px.on = false;
+        if (px.prog) gl.deleteProgram(px.prog);
+        px.prog = null;
+        pixelsEl.classList.remove("on");
+    };
+
+    const pxStart = (prog) => {
+        if (px.prog && px.prog !== prog) gl.deleteProgram(px.prog);
+        px.prog = prog;
+        px.on = true;
+        pixelsEl.classList.add("on");
+        glDraw(prog, PX, PX, pxInputs(), null);
+        pxCompare();
+        if (!px.raf) { px.last = 0; px.raf = requestAnimationFrame(pxTick); }
+    };
+
+    pxPlayEl.addEventListener("click", () => {
+        px.playing = !px.playing;
+        pxPlayEl.textContent = px.playing ? "pause" : "play";
+        if (!px.playing) pxCompare();
+    });
+    pxTimeEl.addEventListener("input", () => {
+        px.t = Number(pxTimeEl.value);
+        pxTimeVal.textContent = px.t.toFixed(2);
+        if (px.prog) { glDraw(px.prog, PX, PX, pxInputs(), null); if (!px.playing) pxCompare(); }
+    });
+    // iMouse as Shadertoy defines it: xy follows the pointer while a button is
+    // down, zw is where it went down (negated once released). Pixels, from the
+    // bottom left.
+    pxGlEl.addEventListener("mousemove", (e) => {
+        const r = pxGlEl.getBoundingClientRect();
+        const x = (e.clientX - r.left) / r.width * PX, y = (1 - (e.clientY - r.top) / r.height) * PX;
+        px.mouse[0] = x; px.mouse[1] = y;
+        if (!px.playing && px.prog) { glDraw(px.prog, PX, PX, pxInputs(), null); pxCompare(); }
+    });
+    pxGlEl.addEventListener("mousedown", () => { px.mouse[2] = px.mouse[0]; px.mouse[3] = px.mouse[1]; });
+    pxGlEl.addEventListener("mouseup", () => { px.mouse[2] = -Math.abs(px.mouse[2]); px.mouse[3] = -Math.abs(px.mouse[3]); });
+
+    // Emit GLSL and HLSL, then -- for a CAPTURE -- run the GLSL on one pixel and
+    // compare with the vm at f32, or -- for an IMAGE -- start pixel mode.
+    const runShaders = (len, hadErr) => {
+        if (hadErr) {
+            const msg = "(parse error — fix the source first)";
+            glslEl.textContent = msg; glslEl.className = "idle";
+            hlslEl.textContent = msg; hlslEl.className = "idle";
+            setResult(glEl, "webgl", "(skipped: parse error)", "idle");
+            pxStop();
+            return;
+        }
+        const gRc = wcall("emit_glsl", len);
+        if (trap) { showGlsl(trapText(trap), "err", 0); setResult(glEl, "webgl", "(skipped: emit trapped)", "idle"); pxStop(); return; }
+        const glslText = readCStr(wasm.last_glsl_code());
+        const image = wasm.last_shader_mode() === 0;
+        showGlsl(glslText, gRc === 0 ? "ok" : "err", 0);
+        const hRc = wcall("emit_hlsl", len);
+        hlslEl.textContent = trap ? trapText(trap) : readCStr(wasm.last_hlsl_code());
+        hlslEl.className = !trap && hRc === 0 ? "ok" : "err";
+
+        if (!glChk.checked) { setResult(glEl, "webgl", "(disabled)", "idle"); pxStop(); return; }
+        if (!gl || !glFloatTargets) { setResult(glEl, "webgl", "(no WebGL2 with float render targets here)", "idle"); pxStop(); return; }
+        if (gRc !== 0) { setResult(glEl, "webgl", "(skipped: emit_glsl refused — see the glsl pane)", "idle"); pxStop(); return; }
+
+        const built = glProgram(glslText);
+        if (built.err) {
+            showGlsl(glslText, "ok", built.line);
+            setResult(glEl, "webgl", built.err, "err");
+            pxStop();
+            return;
+        }
+
+        if (image) {
+            // An image has no top-level result, and the vm / js boxes compile
+            // without the shader profile -- where a float literal is f64 and can
+            // widen a vec out of f32. The comparison that means something is
+            // the pixel row, at f32.
+            const note = "(an image: compared pixel by pixel below, at f32)";
+            setResult(vmEl, "vm", note, "idle");
+            setResult(jsEl, "js", note, "idle");
+            const rc = wcall("image_prepare", len);
+            if (trap || rc !== 0) {
+                setResult(glEl, "webgl", trap ? trapText(trap) : readCStr(wasm.shader_ref_text()), "err");
+                gl.deleteProgram(built.prog);
+                pxStop();
+                return;
+            }
+            pxStart(built.prog);
+            return;
+        }
+        pxStop();
+
+        // A CAPTURE: the vm's answer at f32 first -- a runaway there would
+        // hang the GPU, and a lost context takes the page's WebGL with it.
+        const rc = wcall("run_vm_shader", len);
+        if (trap || rc !== 0) {
+            const why = trap ? trapText(trap) : readCStr(wasm.shader_ref_text());
+            setResult(glEl, "webgl", rc === 2 ? "(skipped: the vm hit its op budget — this would hang the GPU)"
+                                              : "(skipped: vm@f32 failed: " + why + ")", rc === 2 ? "warn" : "idle");
+            gl.deleteProgram(built.prog);
+            return;
+        }
+        const ref = readRes(1);
+        const t0 = performance.now();
+        const raw = Array.from(glDraw(built.prog, 1, 1, { t: 0, frame: 0, mouse: [0, 0, 0, 0] }, ref.isInt ? "int" : "float")).slice(0, ref.vals.length);
+        const ms = performance.now() - t0;
+        gl.deleteProgram(built.prog);
+        const got = fromRaw(ref, raw);
+        let ok = true;
+        for (let k = 0; k < got.length; k++) if (!glAgrees(got[k], ref.vals[k], ref.isInt, 1e-4)) ok = false;
+        let txt = "→ " + fmtRes(ref, raw);
+        txt += ok ? "   ✓ vm@f32" : "   ✗ vm@f32 says " + fmtRes(ref, toRaw(ref));
+        txt += "   [" + ms.toFixed(2) + " ms]";
+        setResult(glEl, "webgl", txt, ok ? "ok" : "mismatch");
+    };
+
+    // The source the heavy half (emit, tree, vm, eval) last ran on. Moving the
+    // caret fires selectionchange, click and keyup, and none of those change
+    // what any of those four produce -- only the debug rows follow the cursor.
+    let lastRunSrc = null;
+
+    const runUpdate = (force) => {
+        const text = srcEl.value;
+        const bytes = encoder.encode(text);
+        const sameSrc = !force && text === lastRunSrc;
+
+        if (bytes.length >= inputCap) {
+            setInfo("input too large (" + bytes.length + " bytes, max " + (inputCap - 1) + ")", true);
+            vizEl.textContent = "";
+            lastRunSrc = null;
+            return;
+        }
+
+        mem().set(bytes, inputPtr);
+
+        // Byte offset of the cursor. textarea cursor is in UTF-16 code units;
+        // re-encode the prefix to count bytes so multi-byte characters line up.
+        const cursorChars = srcEl.selectionStart;
+        const cursorBytes = encoder.encode(text.slice(0, cursorChars)).length;
+
+        const rcUpdate = wcall("update", bytes.length, cursorBytes);
+        if (trap) {
+            // Parsing does not divide, so this is not the expected trap. Stop
+            // rather than read the panes off a call that never finished.
+            setInfo(trapText(trap), true);
+            vizEl.textContent = "";
+            lastRunSrc = null;
+            return;
+        }
+        const hadErr = rcUpdate !== 0;
+
+        const err   = readCStr(wasm.last_error());
+        const debug = readCStr(wasm.last_debug());
+
+        vizEl.textContent = debug;
+
+        if (hadErr && err) {
+            setInfo("parse error: " + err, true);
+        } else {
+            setInfo("ok  —  " + bytes.length + " bytes, cursor @ byte " + cursorBytes, false);
+        }
+
+        // Everything below depends on the source alone, so a caret move is
+        // already finished by the time it gets here.
+        if (sameSrc) return;
+        lastRunSrc = text;
+
+        // Emit both backends whenever the source parses cleanly, independent
+        // of whether either is then run.
+        let jsText = "";
+        if (!hadErr) {
+            // Emission compiles too, and compiling const-folds through the
+            // same interpreter, so guard it the way run_vm is guarded.
+            const cRc = wcall("emit_c", bytes.length);
+            if (trap) {
+                ccodeEl.textContent = trapText(trap); ccodeEl.className = "err";
+                jscodeEl.textContent = trapText(trap); jscodeEl.className = "err";
+                treeEl.textContent = trapText(trap); treeEl.className = "err";
+                setResult(vmEl, "vm", "(skipped: emit trapped)", "idle");
+                setResult(jsEl, "js", "(skipped: emit trapped)", "idle");
+                return;
+            }
+            ccodeEl.textContent = readCStr(wasm.last_c_code());
+            ccodeEl.className = cRc === 0 ? "ok" : "err";
+
+            const jRc = wcall("emit_js", bytes.length);
+            if (trap) {
+                jscodeEl.textContent = trapText(trap); jscodeEl.className = "err";
+                setResult(vmEl, "vm", "(skipped: emit trapped)", "idle");
+                setResult(jsEl, "js", "(skipped: emit trapped)", "idle");
+                return;
+            }
+            jsText = readCStr(wasm.last_js_code());
+            jscodeEl.textContent = jsText;
+            jscodeEl.className = jRc === 0 ? "ok" : "err";
+            if (jRc !== 0) jsText = "";   // a refusal comment, not a module
+
+            wcall("ast_tree", bytes.length);
+            treeEl.textContent = trap ? trapText(trap) : readCStr(wasm.last_tree());
+            treeEl.className = trap ? "err" : "ok";
+            if (trap) { setResult(vmEl, "vm", "(skipped: parse trapped)", "idle");
+                        setResult(jsEl, "js", "(skipped: parse trapped)", "idle");
+                        return; }
+        } else {
+            const msg = "(parse error — fix the source first)";
+            treeEl.textContent   = msg; treeEl.className   = "idle";
+            ccodeEl.textContent  = msg; ccodeEl.className  = "idle";
+            jscodeEl.textContent = msg; jscodeEl.className = "idle";
+        }
+
+        // ---- run the VM on the whole source ----
+        let vmRes = null, runaway = false;
+        if (vmChk.checked && !hadErr) {
+            const rc = wcall("run_vm", bytes.length);
+            if (trap) {
+                // `#disable safe_div_by_zero` compiles to OP_DIV_NATIVE, and a
+                // native integer divide by zero is a wasm trap rather than a
+                // VMStatus the interpreter could return. It is a real answer
+                // about the program, so it belongs in the vm box.
+                setResult(vmEl, "vm", trapText(trap), "err");
+            } else if (rc === 0) {
+                vmRes = readRes(0);
+                setResult(vmEl, "vm", "→ " + (vmRes ? fmtRes(vmRes, toRaw(vmRes)) : readCStr(wasm.last_vm_result())), "ok");
+            } else if (rc === 2) {
+                // Budget exceeded - not a hard error, just a runaway program.
+                runaway = true;
+                const e = readCStr(wasm.last_vm_error());
+                setResult(vmEl, "vm", "⏱ " + (e || "op budget exceeded"), "warn");
+            } else {
+                const e = readCStr(wasm.last_vm_error());
+                setResult(vmEl, "vm", e || "error", "err");
+            }
+        } else if (!vmChk.checked) {
+            setResult(vmEl, "vm", "(disabled)", "idle");
+        } else {
+            setResult(vmEl, "vm", "(skipped: parse error)", "idle");
+        }
+
+        // ---- run the emitted JS ----
+        if (!jsChk.checked) {
+            setResult(jsEl, "js", "(disabled)", "idle");
+        } else if (hadErr) {
+            setResult(jsEl, "js", "(skipped: parse error)", "idle");
+        } else if (!jsText) {
+            setResult(jsEl, "js", "(skipped: emit_js refused — see the js pane)", "idle");
+        } else if (runaway) {
+            // The interpreter has an op budget; new Function() has nothing at
+            // all, so a program that already ran away there is not eval'd here.
+            setResult(jsEl, "js", "(skipped: the vm hit its op budget — this would hang the tab)", "warn");
+        } else {
+            const r = evalEmittedJs(jsText);
+            if (r.err) {
+                setResult(jsEl, "js", r.err, "err");
+            } else {
+                const raw = typeof r.val === "number" ? [r.val]
+                          : Array.isArray(r.val) || ArrayBuffer.isView(r.val) ? Array.from(r.val) : null;
+                const comparable = vmRes !== null && raw !== null && raw.every((x) => typeof x === "number");
+                const got = comparable ? fromRaw(vmRes, raw) : null;
+                const mismatch = comparable && (got.length !== vmRes.total ||
+                                                vmRes.vals.some((w, k) => !agrees(vmRes, w, got[k])));
+                let txt = "→ " + (comparable ? fmtRes(vmRes, raw) : r.val === undefined ? "(void)" : String(r.val));
+                if (mismatch) txt += "   ✗ does not match vm: " + fmtRes(vmRes, toRaw(vmRes));
+                txt += "   [" + r.ms.toFixed(2) + " ms]";
+                setResult(jsEl, "js", txt, mismatch ? "mismatch" : "ok");
+            }
+        }
+
+        // ---- the shaders: emitted under the shader profile, run on WebGL2 ----
+        runShaders(bytes.length, hadErr);
+    };
+
+    // Nothing gets out of here as an uncaught error. These handlers run on
+    // every keystroke and caret move, so an exception thrown from one would be
+    // reported by whatever happens to be watching the page rather than by the
+    // page itself -- which is a bad way to find out, and leaves the panes
+    // showing the previous program with no sign that they are stale.
+    const update = (force) => {
+        try {
+            runUpdate(force);
+        } catch (e) {
+            setInfo("playground error: " + (e && e.message ? e.message : String(e)), true);
+            lastRunSrc = null;
+        }
+    };
+
+    // Persist source in the URL hash so a page refresh restores it.
+    const saveToHash = () => {
+        history.replaceState(null, '', '#' + encodeURIComponent(srcEl.value));
+    };
+
+    // Restore from hash on load, else fall back to the first example.
+    srcEl.value = DEFAULT_SRC;
+    if (location.hash.length > 1) {
+        try {
+            srcEl.value = decodeURIComponent(location.hash.slice(1));
+        } catch (_) { /* malformed hash - keep the default */ }
+    }
+
+    exSel.addEventListener("change", () => {
+        if (exSel.value === "") return;
+        srcEl.value = FLAT[Number(exSel.value)];
+        saveToHash();
+        update();
+        srcEl.focus();
+        srcEl.setSelectionRange(0, 0);
+    });
+
+    vmChk.addEventListener("change", () => update(true));
+    jsChk.addEventListener("change", () => update(true));
+    glChk.addEventListener("change", () => update(true));
+    // Blocks are made of indentation here, so the textarea has to be able to
+    // produce it: Tab indents (Shift+Tab outdents) and Enter carries the
+    // current line's leading spaces onto the next one.
+    //
+    // Every edit goes through execCommand -- deprecated, but the only way to
+    // write into a textarea without throwing its undo stack away. Assigning
+    // .value would make ctrl+Z forget the whole session, which is a worse bug
+    // than no auto-indent at all.
+    const INDENT = "    ";
+    srcEl.addEventListener("keydown", (e) => {
+        if (e.key === "Tab") {
+            e.preventDefault();
+            if (!e.shiftKey) { document.execCommand("insertText", false, INDENT); return; }
+            // Outdent: select back over up to one indent's worth of spaces.
+            const a = srcEl.selectionStart;
+            const before = srcEl.value.slice(0, a);
+            const eat = before.length - before.replace(/ {1,4}$/, "").length;
+            if (!eat) return;
+            srcEl.setSelectionRange(a - eat, a);
+            document.execCommand("delete");
+        } else if (e.key === "Enter") {
+            const a = srcEl.selectionStart;
+            const lineStart = srcEl.value.lastIndexOf("\n", a - 1) + 1;
+            const indent = /^[ \t]*/.exec(srcEl.value.slice(lineStart, a))[0];
+            if (!indent) return;               // nothing to carry
+            // The browser inserts the newline itself -- execCommand("insertText")
+            // silently drops a "\n" in a textarea -- and the indent follows it
+            // once that default action has run.
+            setTimeout(() => document.execCommand("insertText", false, indent), 0);
+        }
+    });
+
+    srcEl.addEventListener("input", () => saveToHash());
+    srcEl.addEventListener("input", update);
+    srcEl.addEventListener("keyup", update);
+    srcEl.addEventListener("click", update);
+    srcEl.addEventListener("select", update);
+    document.addEventListener("selectionchange", () => {
+        if (document.activeElement === srcEl) update();
+    });
+
+    // Tab switching
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            btn.classList.add('active');
+            document.getElementById('panel-' + btn.dataset.tab).classList.add('active');
+        });
+    });
+
+    update();
+    srcEl.focus();
+})();
+</script>
+</body>
+</html>

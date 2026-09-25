@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WASM Application</title>
+<style>
+    body { background: #1e1e1e; color: #fff; margin: 0; overflow: hidden; }
+    canvas { background: #1e1e1e; cursor: default; display: block; touch-action: none; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script type="module">
+import { loadWasm, attachCanvas } from "./platform_wasm.js";
+
+(async () => {
+    // Set title dynamically based on directory name
+    try {
+        const pathParts = window.location.pathname.split('/').filter(Boolean);
+        if (pathParts.length > 0) {
+            const dirName = pathParts[pathParts.length - 1];
+            document.title = dirName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+        }
+    } catch (e) {
+        console.error("Failed to set title dynamically", e);
+    }
+
+    const canvas = document.getElementById("canvas");
+
+    let wasm;
+    try {
+        wasm = await loadWasm("main.wasm");
+    } catch (e) {
+        console.error("WASM load failed", e);
+        return;
+    }
+
+    attachCanvas(canvas, wasm, { fullscreen: true });
+})();
+</script>
+</body>
+</html>
