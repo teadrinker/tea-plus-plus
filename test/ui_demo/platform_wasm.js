@@ -200,13 +200,24 @@ export function attachCanvas(canvas, wasm, opts) {
         const flags = (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 4 : 0) | (e.altKey ? 8 : 0);
         wasm.w_mouse(mapX(e), mapY(e), 0.0, 2, e.button, flags);
     };
+    let lastMx = 0, lastMy = 0, lastButtons = 0, pointerSeen = false;
+    const sendMove = (mxv, myv, buttons, flags) => {
+        if (buttons & 1)      wasm.w_mouse(mxv, myv, 0.0, 3, 0, flags);
+        else if (buttons & 4) wasm.w_mouse(mxv, myv, 0.0, 3, 1, flags);
+        else if (buttons & 2) wasm.w_mouse(mxv, myv, 0.0, 3, 2, flags);
+        else                  wasm.w_mouse(mxv, myv, 0.0, 0, -1, flags);
+    };
     const onPointerMove = e => {
         const flags = (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 4 : 0) | (e.altKey ? 8 : 0);
-        const mxv = mapX(e), myv = mapY(e);
-        if (e.buttons & 1)      wasm.w_mouse(mxv, myv, 0.0, 3, 0, flags);
-        else if (e.buttons & 4) wasm.w_mouse(mxv, myv, 0.0, 3, 1, flags);
-        else if (e.buttons & 2) wasm.w_mouse(mxv, myv, 0.0, 3, 2, flags);
-        else                    wasm.w_mouse(mxv, myv, 0.0, 0, -1, flags);
+        lastMx = mapX(e); lastMy = mapY(e); lastButtons = e.buttons; pointerSeen = true;
+        sendMove(lastMx, lastMy, lastButtons, flags);
+    };
+    const onPointerLeave = () => { pointerSeen = false; };
+    // Modifier changes carry no pointer event, so replay the last position with the new flags.
+    const onModifierKey = e => {
+        if (!pointerSeen || (e.key !== "Control" && e.key !== "Shift" && e.key !== "Alt")) return;
+        const flags = (e.ctrlKey ? 2 : 0) | (e.shiftKey ? 4 : 0) | (e.altKey ? 8 : 0);
+        sendMove(lastMx, lastMy, lastButtons, flags);
     };
     // Wheel deltas come in wildly different units: a mouse notch is a single
     // coarse event (~100px in Chrome/Safari, 3 "lines" in Firefox), while a
@@ -234,6 +245,7 @@ export function attachCanvas(canvas, wasm, opts) {
     canvas.addEventListener("pointerdown", onPointerDown);
     canvas.addEventListener("pointerup", onPointerUp);
     canvas.addEventListener("pointermove", onPointerMove);
+    canvas.addEventListener("pointerleave", onPointerLeave);
     canvas.addEventListener("wheel", onWheel);
     canvas.addEventListener("contextmenu", onContextMenu);
 
@@ -310,6 +322,8 @@ export function attachCanvas(canvas, wasm, opts) {
         }
     };
     keyTarget.addEventListener("keydown", onKeyDown);
+    keyTarget.addEventListener("keydown", onModifierKey);
+    keyTarget.addEventListener("keyup", onModifierKey);
 
     function destroy() {
         running = false;
@@ -321,9 +335,12 @@ export function attachCanvas(canvas, wasm, opts) {
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointerup", onPointerUp);
         canvas.removeEventListener("pointermove", onPointerMove);
+        canvas.removeEventListener("pointerleave", onPointerLeave);
         canvas.removeEventListener("wheel", onWheel);
         canvas.removeEventListener("contextmenu", onContextMenu);
         keyTarget.removeEventListener("keydown", onKeyDown);
+        keyTarget.removeEventListener("keydown", onModifierKey);
+        keyTarget.removeEventListener("keyup", onModifierKey);
     }
 
     return { resize, destroy };
