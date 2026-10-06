@@ -1,9 +1,11 @@
 
 # Tea++
 
-DSL / programming langage for Mad Tea Synth, and possibly a future version of [Mad Tea Lab](https://madtealab.com)...
+DSL / programming langage for [Mad Tea Synth](https://github.com/teadrinker/mad-tea-synth), and possibly a future version of [Mad Tea Lab](https://madtealab.com)...
 
-Source code in [Mad Tea Synth Repo](https://github.com/teadrinker/mad-tea-synth/tree/main/source/vm)
+Try it out online: [Normal VM](https://teadrinker.github.io/tea-plus-plus/test/ui_demo/?page=test) / [Reactive VM](https://teadrinker.github.io/tea-plus-plus/test/ui_demo/?page=reactive)
+
+Source code is in [Mad Tea Synth Repo](https://github.com/teadrinker/mad-tea-synth/tree/main/source/vm)
 
 **Parts:**
 
